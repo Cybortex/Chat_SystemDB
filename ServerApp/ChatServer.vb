@@ -34,15 +34,7 @@ Public Class ChatServer
             Console.WriteLine("===============================")
 
             While Not _cts.Token.IsCancellationRequested
-                Dim tcpClient = Await _listener.AcceptTcpClientAsync()
-                Dim clientEndPoint = tcpClient.Client.RemoteEndPoint.ToString()
-                Console.WriteLine($"✓ Client connected: {clientEndPoint}")
-
-                Task.Run(Function() HandleClient(tcpClient))
-            End While
-
-            While Not _cts.Token.IsCancellationRequested
-                Dim tcpClient = Await _listener.AcceptTcpClientAsync()
+                Dim tcpClient = Await _listener.AcceptTcpClientAsync(_cts.Token)
                 Dim clientEndPoint = tcpClient.Client.RemoteEndPoint.ToString()
                 Console.WriteLine($"✓ Client connected: {clientEndPoint}")
 
