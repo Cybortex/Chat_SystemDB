@@ -126,21 +126,100 @@ Public Class ChatServer
 
                             Select Case msg.Type.ToLowerInvariant()
 
-                                Case "identify"
-                                    If msg.Data Is Nothing OrElse Not msg.Data.ContainsKey("email") Then
-                                        Await writer.WriteLineAsync(JsonSerializer.Serialize(New With {
-                                            .type = "error",
-                                            .errorMsg = "Missing data.email"
-                                        }, _jsonOptions))
+                                Case "signup"
+                                    ' Create a new user: expects data.email and data.password, optional data.displayName
+                                    If msg.Data Is Nothing OrElse Not msg.Data.ContainsKey("email") OrElse Not msg.Data.ContainsKey("password") Then
+                                        Await writer.WriteLineAsync(JsonSerializer.Serialize(New With {.type = "error", .errorMsg = "Missing data.email or data.password"}, _jsonOptions))
                                         Continue While
                                     End If
 
-                                    email = msg.Data("email").GetString()
-                                    If email Is Nothing Then email = ""
-                                    email = email.Trim().ToLowerInvariant()
+                                    Dim signupEmail = msg.Data("email").GetString()
+                                    Dim signupPassword = msg.Data("password").GetString()
+                                    Dim signupDisplay As String = Nothing
+                                    If msg.Data.ContainsKey("displayName") Then
+                                        signupDisplay = msg.Data("displayName").GetString()
+                                    End If
+
+                                    If signupEmail Is Nothing Then signupEmail = ""
+                                    signupEmail = signupEmail.Trim().ToLowerInvariant()
+                                    If String.IsNullOrWhiteSpace(signupPassword) Then signupPassword = ""
+
+                                    If signupEmail = "" OrElse signupPassword = "" Then
+                                        Await writer.WriteLineAsync(JsonSerializer.Serialize(New With {.type = "error", .errorMsg = "Empty email or password"}, _jsonOptions))
+                                        Continue While
+                                    End If
+
+                                    ' Check existing
+                                    Dim exists = Await SupabaseRest.UserExistsAsync(signupEmail)
+                                    If exists Then
+                                        Await writer.WriteLineAsync(JsonSerializer.Serialize(New With {.type = "error", .errorMsg = "User already exists"}, _jsonOptions))
+                                        Continue While
+                                    End If
+
+                                    ' Create auth user and insert into users table
+                                    Dim createdAuth = False
+                                    Try
+                                        createdAuth = Await SupabaseRest.CreateAuthUserAsync(signupEmail, signupPassword)
+                                    Catch ex As Exception
+                                        Console.WriteLine($"CreateAuthUserAsync failed: {ex.Message}")
+                                    End Try
+
+                                    If Not createdAuth Then
+                                        Await writer.WriteLineAsync(JsonSerializer.Serialize(New With {.type = "error", .errorMsg = "Failed to create auth user"}, _jsonOptions))
+                                        Continue While
+                                    End If
+
+                                    Try
+                                        Await SupabaseRest.InsertUserAsync(signupEmail, If(signupDisplay, ""))
+                                    Catch ex As Exception
+                                        Console.WriteLine($"InsertUserAsync failed: {ex.Message}")
+                                    End Try
+
+                                    Await writer.WriteLineAsync(JsonSerializer.Serialize(New With {.type = "signup_ok", .data = New With {.email = signupEmail}}, _jsonOptions))
+
+                                Case "identify"
+                                    ' Support identify via access_token (Supabase) or plain email for backward compatibility
+                                    Dim providedToken As String = Nothing
+                                    If msg.Data IsNot Nothing AndAlso msg.Data.ContainsKey("access_token") Then
+                                        providedToken = msg.Data("access_token").GetString()
+                                    End If
+
+                                    If Not String.IsNullOrWhiteSpace(providedToken) Then
+                                        Dim verifiedEmail = Await SupabaseAuth.GetEmailFromAccessTokenAsync(providedToken)
+                                        If String.IsNullOrWhiteSpace(verifiedEmail) Then
+                                            Await writer.WriteLineAsync(JsonSerializer.Serialize(New With {.type = "error", .errorMsg = "Invalid token"}, _jsonOptions))
+                                            Continue While
+                                        End If
+                                        email = verifiedEmail.Trim().ToLowerInvariant()
+                                    Else
+                                        If msg.Data Is Nothing OrElse Not msg.Data.ContainsKey("email") Then
+                                            Await writer.WriteLineAsync(JsonSerializer.Serialize(New With {
+                                                .type = "error",
+                                                .errorMsg = "Missing data.email"
+                                            }, _jsonOptions))
+                                            Continue While
+                                        End If
+
+                                        email = msg.Data("email").GetString()
+                                        If email Is Nothing Then email = ""
+                                        email = email.Trim().ToLowerInvariant()
+                                    End If
 
                                     If email = "" Then
                                         Await writer.WriteLineAsync(JsonSerializer.Serialize(New With {.type = "error", .errorMsg = "Empty email"}, _jsonOptions))
+                                        Continue While
+                                    End If
+
+                                    ' Ensure the identified email exists in our users table
+                                    Dim existsUser = False
+                                    Try
+                                        existsUser = Await SupabaseRest.UserExistsAsync(email)
+                                    Catch ex As Exception
+                                        Console.WriteLine($"UserExistsAsync failed: {ex.Message}")
+                                    End Try
+
+                                    If Not existsUser Then
+                                        Await writer.WriteLineAsync(JsonSerializer.Serialize(New With {.type = "error", .errorMsg = "User not registered. Please sign up first."}, _jsonOptions))
                                         Continue While
                                     End If
 
@@ -193,6 +272,27 @@ Public Class ChatServer
                                             .type = "sent",
                                             .errorMsg = "User offline/not found"
                                         }, _jsonOptions))
+                                    End If
+
+                                    ' Persist message to Supabase (fire-and-forget)
+                                    Try
+                                        _ = SupabaseRest.InsertMessageAsync(email, toEmail, text)
+                                    Catch ex As Exception
+                                        Console.WriteLine($"Supabase insert failed: {ex.Message}")
+                                    End Try
+
+                                    ' If recipient offline, attempt push notifications
+                                    If Not _clients.ContainsKey(toEmail) Then
+                                        Task.Run(Async Function()
+                                                   Try
+                                                       Dim tokens = Await SupabaseRest.GetDeviceTokensForUserAsync(toEmail)
+                                                       For Each t In tokens
+                                                           _ = PushNotifications.SendFcmAsync(t, "New message", $"{email}: {text}", New With {.from = email, .text = text})
+                                                       Next
+                                                   Catch ex As Exception
+                                                       Console.WriteLine($"Push notify failed: {ex.Message}")
+                                                   End Try
+                                               End Function)
                                     End If
 
                                 Case Else

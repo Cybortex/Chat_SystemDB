@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="ClientApp/ClientApp.vbproj" />
+  <Project Path="ServerApp/ServerApp/ServerApp.vbproj" />
+</Solution>
